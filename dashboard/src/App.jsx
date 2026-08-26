@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Clapperboard } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -7,6 +7,7 @@ import ProcessingAnimation from './components/ProcessingAnimation';
 // import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
 import SaaShortsTab from './components/SaaShortsTab';
+import TopicToVideoTab from './components/TopicToVideoTab';
 import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
@@ -224,6 +225,18 @@ function App() {
   // fal.ai API State - Load encrypted
   const [falKey, setFalKey] = useState(() => {
     const stored = localStorage.getItem('falKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+
+  // Topic-to-Video API State (BYOK) - Load encrypted
+  const [openaiKey, setOpenaiKey] = useState(() => {
+    const stored = localStorage.getItem('openaiKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
+  const [pexelsKey, setPexelsKey] = useState(() => {
+    const stored = localStorage.getItem('pexelsKey_v1');
     if (stored) return decrypt(stored);
     return '';
   });
@@ -574,6 +587,18 @@ function App() {
   }, [falKey]);
 
   useEffect(() => {
+    if (openaiKey) {
+      localStorage.setItem('openaiKey_v1', encrypt(openaiKey));
+    }
+  }, [openaiKey]);
+
+  useEffect(() => {
+    if (pexelsKey) {
+      localStorage.setItem('pexelsKey_v1', encrypt(pexelsKey));
+    }
+  }, [pexelsKey]);
+
+  useEffect(() => {
     if ((uploadPostKey || isManaged) && userProfiles.length === 0) {
       fetchUserProfiles({ silent: true });
     }
@@ -702,7 +727,7 @@ function App() {
   // Included in the plan (fully managed, no keys): Clip Generator + YouTube Studio.
   // Advanced (bring your own fal.ai + ElevenLabs keys): AI Shorts + AI Agent.
   const INCLUDED_TOOL_TABS = ['dashboard', 'thumbnails'];
-  const ADVANCED_TOOL_TABS = ['saasshorts', 'ai-agent'];
+  const ADVANCED_TOOL_TABS = ['saasshorts', 'ai-agent', 'topicvideo'];
   const TOOL_NAMES = { dashboard: 'the Clip Generator', thumbnails: 'the YouTube Studio' };
   const gateThisTab = needsPlan && INCLUDED_TOOL_TABS.includes(activeTab);      // included tool, no plan yet
   const advancedThisTab = billingEnabled && ADVANCED_TOOL_TABS.includes(activeTab); // BYOK-notice tools
@@ -870,10 +895,11 @@ function App() {
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     { id: 'saasshorts', ord: '02', icon: Sparkles, label: 'AI Shorts', short: 'ai shorts', byok: true, primary: true },
     { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
-    { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
-    { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
-    ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History', short: 'history' }] : []),
-    { id: 'settings', ord: '07', icon: Settings, label: 'Settings', short: 'settings' },
+    { id: 'topicvideo', ord: '04', icon: Clapperboard, label: 'Topic to Video', short: 'topic', byok: true },
+    { id: 'ugc-gallery', ord: '05', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
+    { id: 'thumbnails', ord: '06', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
+    ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
+    { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
 
@@ -1441,6 +1467,11 @@ function App() {
           {/* View: SaaS Shorts */}
           {activeTab === 'saasshorts' && (
             <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
+          )}
+
+          {/* View: Topic to Video */}
+          {activeTab === 'topicvideo' && (
+            <TopicToVideoTab openaiKey={openaiKey} setOpenaiKey={setOpenaiKey} pexelsKey={pexelsKey} setPexelsKey={setPexelsKey} />
           )}
 
           {/* View: AI Agent */}

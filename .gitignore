@@ -24,6 +24,9 @@ output/
 .idea/
 .vscode/
 
+# Vite dep cache
+.vite/
+
 # Secrets
 .env
 

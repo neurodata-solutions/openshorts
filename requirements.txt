@@ -18,3 +18,24 @@ python-multipart==0.0.27
 httpx==0.28.1
 Pillow==12.2.0
 beautifulsoup4==4.14.3
+
+# Topic-to-Video (topic_video/, ported from MoneyPrinterTurbo): OpenAI-only
+# script/terms generation, edge-tts-only narration, Pexels-only stock
+# footage, MoviePy composition.
+#
+# moviepy==2.2.1 (the latest release on PyPI) is NOT listed here: its own
+# metadata hard-pins `pillow<12.0`, which conflicts with this repo's
+# Pillow==12.2.0. That upper bound is moviepy's own declared constraint,
+# not a real incompatibility -- none of moviepy's actual runtime deps
+# (listed below) cap Pillow below 12; imageio, the one that touches Pillow
+# at all, only requires pillow>=8.3.2. The Dockerfile installs moviepy
+# separately with `--no-deps` to skip that false conflict while every other
+# dependency (including these four) still resolves normally.
+decorator==5.3.1
+imageio==2.37.4
+imageio_ffmpeg==0.6.0
+proglog==0.1.12
+edge-tts==7.2.7
+openai==2.24.0
+loguru==0.7.3
+requests==2.33.1

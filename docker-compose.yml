@@ -3,11 +3,18 @@ services:
     build: .
     container_name: openshorts-backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - .:/app
       - /app/__pycache__
       - ./output:/app/output
+      - openshorts_runtime_data:/data
+    environment:
+      # /app is bind-mounted from the host (owned by the host user), but the
+      # container runs as non-root appuser (uid 999) — it can't write there.
+      # Route writable runtime state to a named volume instead.
+      - YOLO_MODEL_PATH=/data/yolov8n.pt
+      - MPLCONFIGDIR=/data/mplconfig
     restart: unless-stopped
 
   frontend:
@@ -16,7 +23,7 @@ services:
       target: dev
     container_name: openshorts-frontend
     ports:
-      - "5175:5173"
+      - "127.0.0.1:5175:5173"
     volumes:
       - ./dashboard:/app
       - /app/node_modules
@@ -30,7 +37,7 @@ services:
       dockerfile: render-service/Dockerfile
     container_name: openshorts-renderer
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     volumes:
       - ./output:/output
     environment:
@@ -40,3 +47,6 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+
+volumes:
+  openshorts_runtime_data:

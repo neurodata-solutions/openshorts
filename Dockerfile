@@ -15,6 +15,14 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
+# moviepy==2.2.1 (topic_video/, Topic-to-Video pipeline) is intentionally not
+# in requirements.txt: its metadata hard-pins `pillow<12.0`, which conflicts
+# with this repo's Pillow==12.2.0 pin used elsewhere. That bound is moviepy's
+# own declared constraint, not a real incompatibility -- its actual runtime
+# deps (decorator/imageio/imageio_ffmpeg/proglog, all in requirements.txt)
+# don't cap Pillow below 12. Installing with --no-deps skips just that false
+# conflict; every other moviepy dependency still resolved normally above.
+RUN pip install --no-cache-dir --no-deps moviepy==2.2.1
 # Cloud (paid mode) deps: installed always so one image serves both modes; they
 # are only imported when BILLING_ENABLED is set. Harmless/unused in self-host.
 RUN pip install --no-cache-dir -r requirements-billing.txt

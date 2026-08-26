@@ -998,6 +998,23 @@ async def cleanup_jobs():
             except NameError:
                 pass
 
+            # Cleanup Topic-to-Video jobs from memory (same pattern as
+            # saas_jobs above: the directory itself is already purged by the
+            # generic OUTPUT_DIR sweep near the top of this loop, this only
+            # drops the in-memory record).
+            try:
+                topic_expired = [
+                    jid for jid, jdata in list(topic_jobs.items())
+                    if jdata.get("status") in ("completed", "failed")
+                    and jdata.get("output_dir")
+                    and os.path.isdir(jdata["output_dir"])
+                    and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
+                ]
+                for jid in topic_expired:
+                    del topic_jobs[jid]
+            except NameError:
+                pass
+
             # Cleanup Uploads
             for filename in os.listdir(UPLOAD_DIR):
                 file_path = os.path.join(UPLOAD_DIR, filename)
@@ -1425,11 +1442,13 @@ def _purge_local_jobs_for_user(user_id) -> int:
     own disk, which would otherwise sit around until the one-hour cleanup sweep
     — and thumbnails not even then, because that sweep skips their directory.
 
-    Three stores, because each records ownership differently:
+    Four stores, because each records ownership differently:
       - clip jobs: the ``.owner`` file every managed job writes, so jobs
         recovered from disk after a restart (no in-memory record) count too;
       - SaaSShorts jobs (``output/saas_<id>``): ``saas_jobs`` only, no marker
         file, so a restart loses the link and those age out on the sweep;
+      - Topic-to-Video jobs (``output/topic_<id>``): ``topic_jobs`` only,
+        same in-memory-only caveat as SaaSShorts jobs;
       - thumbnail sessions (``output/thumbnails/<id>`` plus the source video in
         ``uploads/``): likewise in-memory only.
 
@@ -1474,6 +1493,15 @@ def _purge_local_jobs_for_user(user_id) -> int:
         if out:
             _rm_under(OUTPUT_DIR, os.path.basename(out))
         saas_jobs.pop(jid, None)
+        removed += 1
+
+    for jid, job in list(topic_jobs.items()):
+        if not _owned_by(job, uid):
+            continue
+        out = job.get('output_dir')
+        if out:
+            _rm_under(OUTPUT_DIR, os.path.basename(out))
+        topic_jobs.pop(jid, None)
         removed += 1
 
     for sid, sess in list(thumbnail_sessions.items()):
@@ -2223,6 +2251,58 @@ def _presented_status(job_id, job):
         if m and _manifest_busy_elsewhere(m):
             return 'processing'
     return job['status']
+
+
+class AnalyzeRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/analyze")
+async def analyze_endpoint(req: AnalyzeRequest):
+    """Raw structural analysis of a reference video — download, scene cuts,
+    transcript. No Gemini call and no clip generation: this is the primitive
+    a 'find the formula of a video' workflow builds on, kept independent of
+    any Gemini key/quota. Same in-process pattern as the Thumbnail Studio's
+    background Whisper step (download_youtube_video + transcribe_video, see
+    /api/thumbnail/upload above), with detect_scenes added and no
+    billing/entitlement gating — self-host only, not wired into `jobs[...]`'s
+    subprocess/webhook machinery since there's no render step here.
+    Poll with the existing GET /api/status/{job_id}."""
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {'status': 'queued', 'logs': [f"Analysis {job_id} queued."], 'result': None}
+
+    async def run_analysis():
+        jobs[job_id]['status'] = 'processing'
+        video_path = None
+        try:
+            from main import download_youtube_video, detect_scenes, transcribe_video
+            loop = asyncio.get_event_loop()
+            video_path, title = await loop.run_in_executor(
+                None, download_youtube_video, req.url, UPLOAD_DIR)
+            jobs[job_id]['logs'].append(f"Downloaded: {title}")
+
+            scene_list, _fps = await loop.run_in_executor(None, detect_scenes, video_path)
+            scenes = [
+                {"start": start.get_seconds(), "end": end.get_seconds()}
+                for start, end in scene_list
+            ]
+            jobs[job_id]['logs'].append(f"Detected {len(scenes)} scenes")
+
+            transcript = await loop.run_in_executor(None, transcribe_video, video_path)
+            jobs[job_id]['logs'].append("Transcription complete")
+
+            jobs[job_id]['result'] = {"title": title, "scenes": scenes, "transcript": transcript}
+            jobs[job_id]['status'] = 'completed'
+        except Exception as e:
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['result'] = {"error": str(e)}
+            jobs[job_id]['logs'].append(f"Failed: {e}")
+        finally:
+            if video_path and os.path.exists(video_path):
+                os.remove(video_path)
+
+    asyncio.create_task(run_analysis())
+    return {"job_id": job_id}
 
 
 @app.get("/api/status/{job_id}")
@@ -5631,3 +5711,143 @@ async def saasshorts_voices(
         ],
         "source": "defaults",
     }
+
+
+# ---------------------------------------------------------------------------
+# Topic-to-Video (ported MoneyPrinterTurbo pipeline: topic -> LLM script ->
+# edge-tts narration -> Pexels stock footage -> MoviePy composition).
+# v1 scope: OpenAI-only script/terms generation, edge-tts-only narration,
+# Pexels-only stock footage, no BGM. See topic_video/pipeline.py.
+#
+# Mirrors the SaaSShorts job lifecycle immediately above this block:
+# in-memory job dict, async job creation, concurrency_semaphore, a sync
+# pipeline function run via run_in_executor, status polling.
+# ---------------------------------------------------------------------------
+from topic_video.pipeline import (
+    generate_topic_video,
+    TopicVideoError,
+    CURATED_VOICES,
+)
+
+# State for Topic-to-Video jobs (separate from clip-generator and SaaSShorts jobs)
+topic_jobs: Dict[str, Dict] = {}
+
+
+class TopicVideoGenerateRequest(BaseModel):
+    topic: str
+    video_language: Optional[str] = ""  # "" = auto-detect
+    voice_name: Optional[str] = None  # edge-tts voice id, see GET .../voices
+    voice_rate: Optional[float] = 1.0
+    video_aspect: Optional[str] = "9:16"  # "16:9" | "9:16" | "1:1"
+    subtitle_enabled: bool = True
+
+
+@app.post("/api/topicvideo/generate")
+async def topicvideo_generate(
+    req: TopicVideoGenerateRequest,
+    request: Request,
+    x_openai_key: Optional[str] = Header(None, alias="X-OpenAI-Key"),
+    x_pexels_key: Optional[str] = Header(None, alias="X-Pexels-Key"),
+):
+    """Generate a video from a topic. Returns a job_id for polling."""
+    await require_managed_entitlement(request)
+
+    if not x_openai_key:
+        raise HTTPException(status_code=400, detail="Missing OpenAI API Key (X-OpenAI-Key header)")
+    if not x_pexels_key:
+        raise HTTPException(status_code=400, detail="Missing Pexels API Key (X-Pexels-Key header)")
+
+    if not req.topic or not req.topic.strip():
+        raise HTTPException(status_code=400, detail="Missing topic")
+
+    job_id = str(uuid.uuid4())
+    job_output_dir = os.path.join(OUTPUT_DIR, f"topic_{job_id}")
+    os.makedirs(job_output_dir, exist_ok=True)
+    topic_jobs[job_id] = {
+        "user_id": await _owner_id(request),
+        "status": "processing",
+        "logs": ["Topic-to-Video job started."],
+        "result": None,
+        "output_dir": job_output_dir,
+    }
+
+    pipeline_config = {
+        "openai_api_key": x_openai_key,
+        "pexels_api_key": x_pexels_key,
+        "video_language": req.video_language or "",
+        "voice_name": req.voice_name or "",
+        "voice_rate": req.voice_rate or 1.0,
+        "video_aspect": req.video_aspect or "9:16",
+        "subtitle_enabled": req.subtitle_enabled,
+    }
+
+    async def run_generation():
+        await concurrency_semaphore.acquire()
+        try:
+            loop = asyncio.get_running_loop()
+
+            def log_msg(msg):
+                print(f"[TopicVideo Job {job_id[:8]}] {msg}")
+                if job_id in topic_jobs:
+                    topic_jobs[job_id]["logs"].append(msg)
+
+            def run():
+                return generate_topic_video(req.topic, pipeline_config, job_output_dir, log_msg)
+
+            result = await loop.run_in_executor(None, run)
+
+            if job_id in topic_jobs:
+                video_filename = result["video_filename"]
+                subtitle_path = result.get("subtitle_path") or ""
+                topic_jobs[job_id]["status"] = "completed"
+                topic_jobs[job_id]["result"] = {
+                    "video_url": f"/videos/topic_{job_id}/{video_filename}",
+                    "video_filename": video_filename,
+                    "subtitle_url": (
+                        f"/videos/topic_{job_id}/{os.path.basename(subtitle_path)}"
+                        if subtitle_path
+                        else None
+                    ),
+                    "duration": result.get("duration", 0),
+                    "script": result.get("script", ""),
+                    "terms": result.get("terms", []),
+                }
+                topic_jobs[job_id]["logs"].append("Video generation completed!")
+
+        except TopicVideoError as e:
+            print(f"[TopicVideo] ❌ Job {job_id} failed at stage '{e.stage}': {e.message}")
+            if job_id in topic_jobs:
+                topic_jobs[job_id]["status"] = "failed"
+                topic_jobs[job_id]["logs"].append(f"Error [{e.stage}]: {e.message}")
+        except Exception as e:
+            print(f"[TopicVideo] ❌ Job {job_id} failed: {e}")
+            if job_id in topic_jobs:
+                topic_jobs[job_id]["status"] = "failed"
+                topic_jobs[job_id]["logs"].append(f"Error: {str(e)}")
+        finally:
+            concurrency_semaphore.release()
+
+    asyncio.create_task(run_generation())
+
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/topicvideo/status/{job_id}")
+async def topicvideo_status(job_id: str, request: Request):
+    """Poll a Topic-to-Video job's status."""
+    if job_id not in topic_jobs:
+        raise HTTPException(status_code=404, detail="Topic-to-Video job not found")
+
+    job = topic_jobs[job_id]
+    await _assert_job_owner(request, job)
+    return {
+        "status": job["status"],
+        "logs": job["logs"],
+        "result": job.get("result"),
+    }
+
+
+@app.get("/api/topicvideo/voices")
+async def topicvideo_voices():
+    """List the curated edge-tts voices the v1 Topic-to-Video UI offers."""
+    return {"voices": CURATED_VOICES}
